@@ -44,8 +44,17 @@ receiver.app.use(express.static(path.join(__dirname, "web")));
 receiver.app.post("/api/analyze", async (req, res) => {
   try {
     const { text } = req.body;
+    const timestamp = new Date().toISOString();
+    const queryPreview = text?.length > 100 ? text.substring(0, 100) + "..." : text;
+    console.log(`[${timestamp}] 📥 Query received from Web UI: "${queryPreview}"`);
+    
     // Map Web UI calls to a generic channel_id or specific 'web' context
-    const result = await processIncomingMessage({ text, channel_id: "web-ui" });
+    const result = await processIncomingMessage({ text, channel_id: "nochannel-web-ui" });
+    
+    const outputTimestamp = new Date().toISOString();
+    const outputPreview = result.text?.length > 100 ? result.text.substring(0, 100) + "..." : result.text;
+    console.log(`[${outputTimestamp}] 📤 Response sent to Web UI (source: ${result.source}): "${outputPreview}"`);
+    
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -72,15 +81,30 @@ app.event("app_mention", async ({ event, client, logger }) => {
       return;
     }
 
+    const timestamp = new Date().toISOString();
+    const queryPreview = cleanText.length > 100 ? cleanText.substring(0, 100) + "..." : cleanText;
+    console.log(`[${timestamp}] 📥 Query received from Slack (channel: ${event.channel}): "${queryPreview}"`);
+
     const result = await processIncomingMessage({ 
       text: cleanText, 
       channel_id: event.channel 
     });
 
+    const outputTimestamp = new Date().toISOString();
+    const outputPreview = result.text?.length > 100 ? result.text.substring(0, 100) + "..." : result.text;
+    const sourceInfo = result.source === "both" ? "policy_engine + rag_history" : result.source;
+    console.log(`[${outputTimestamp}] 📤 Response sent to Slack (channel: ${event.channel}, source: ${sourceInfo}): "${outputPreview}"`);
+
+    // Format message for Slack - if both results, use a cleaner format
+    let messageText = result.text || "I couldn't process that request.";
+    if (result.source === "both" && result.policy_result && result.rag_result) {
+      messageText = `*Policy Engine Result:*\n${result.policy_result.text}\n\n*Additional Context from Slack History:*\n${result.rag_result.text}`;
+    }
+
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.ts,
-      text: result.text || "I couldn't process that request.",
+      text: messageText,
     });
   } catch (err) {
     logger.error(err);

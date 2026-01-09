@@ -2,6 +2,7 @@ import { ollamaEmbed } from "./ollama.js";
 import { searchSimilar } from "../db/slackChunksRepo.js";
 
 export async function retrieveContexts({ channel_id, question }) {
+  //console.log("Retrieving contexts for question ", question, " and channel_id ", channel_id);
   const topK = parseInt(process.env.TOP_K || "8", 10);
   const embedding = await ollamaEmbed(question);
   const rows = await searchSimilar({ channel_id, queryEmbedding: embedding, topK });

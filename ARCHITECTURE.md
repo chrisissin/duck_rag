@@ -21,6 +21,7 @@ The project now uses `src/server.js` as the unified entry point that handles:
     ┌──────────▼──────────┐  ┌───────▼──────────┐
     │  Slack Events       │  │  Web API         │
     │  (app_mention)      │  │  (/api/analyze)  │
+    │  channel_id: C123   │  │  channel_id: null│
     └──────────┬──────────┘  └───────┬──────────┘
                │                      │
                └──────────┬───────────┘
@@ -33,23 +34,73 @@ The project now uses `src/server.js` as the unified entry point that handles:
         ┌─────────────────┴─────────────────┐
         │                                     │
 ┌───────▼────────┐                  ┌───────▼────────┐
-│  Parser Engine │                  │  RAG Fallback  │
+│  Parser Engine │                  │  RAG System     │
 │  (parseAlert)  │                  │  (retrieveContexts) │
-└───────┬────────┘                  └───────┬────────┘
-        │                                   │
-        │ (if matched)                      │ (if no match)
-        │                                   │
-┌───────▼────────┐                  ┌───────▼────────┐
-│  Decision      │                  │  Build Prompt  │
-│  (decide)      │                  │  + Ollama Chat  │
-└───────┬────────┘                  └────────────────┘
-        │
+│                │                  │                 │
+│  ┌──────────┐  │                  │  Slack: Filter │
+│  │ Policies │  │                  │  by channel_id │
+│  │ (Pluggable│  │                  │  Web UI: All   │
+│  │  per org)│  │                  │  channels      │
+│  └────┬─────┘  │                  └───────┬────────┘
+│       │        │                          │
+│       │ Load from                        │
+│       │ config/policies.json             │
+│       │ (org-specific)                   │
+│       │                                  │
+└───────┼────────┘                  ┌───────▼────────┐
+        │                           │  Build Prompt  │
+        │ (if matched)              │  + Ollama Chat │
+        │                           └────────────────┘
+┌───────▼────────┐
+│  Decision      │
+│  (decide)      │
+└───────┬────────┘
         │
 ┌───────▼────────┐
 │  Format Report │
 │  (formatReport)│
 └────────────────┘
 ```
+
+### Key Architecture Features
+
+**1. Pluggable Policies for Different Organizations**
+- Policies are stored in `config/policies.json` (configurable via `POLICIES_PATH` env var)
+- Each organization can maintain their own policies file without modifying core code
+- Policies are excluded from git (via `.gitignore`) to allow organization-specific customization
+- The parser engine automatically loads and applies policies at runtime
+- No code changes needed to add new alert types - just update the JSON configuration
+
+**2. RAG Behavior Differences**
+
+**Slack Interface:**
+- Provides RAG with **relevant channel history only**
+- Filters chunks by `channel_id` matching the event's channel
+- Ensures users only see context from channels they have access to
+- Safe default: no cross-channel data leakage
+
+**Web UI:**
+- Combines **all history across all channels**
+- Uses `channel_id: null` to search across all indexed chunks
+- Provides comprehensive context for analysis
+- Useful for cross-channel research and analysis
+
+## Security & Privacy: Internal-Only Ecosystem
+
+**Important**: This architecture is designed to keep all data processing internal and private:
+
+- **All components run internally** - No external LLM APIs (OpenAI, Anthropic, etc.)
+- **Local Ollama** - All LLM processing uses local Ollama instance (no data leaves your infrastructure)
+- **Internal Database** - Postgres with pgvector runs locally/internally
+- **Only Slack Interface is External** - The Slack API is the only external service (required for Slack integration)
+- **No Data Training** - Internal data never reaches public models or external training systems
+- **Privacy-First Design** - Ensures sensitive internal conversations and alerts remain within your organization
+
+This design addresses concerns about:
+- Internal data being used to train public models
+- Data leakage to external services
+- Compliance with data privacy regulations
+- Control over sensitive organizational information
 
 ## Key Components
 
@@ -62,14 +113,26 @@ The project now uses `src/server.js` as the unified entry point that handles:
 ### 2. `orchestrator.js` (Core Logic)
 - **Phase 1**: Tries to parse incoming text as an alert using `parseAlert()`
   - If matched → goes to decision engine
-  - If not matched → falls back to RAG
-- **Phase 2**: If not an alert, searches Slack history using RAG
+  - Always runs RAG in parallel (even if policy matched)
+- **Phase 2**: Always searches Slack history using RAG
+  - **Slack**: Filters by `channel_id` to get relevant channel history only
+  - **Web UI**: Uses `channel_id: null` to search across all channels
   - Retrieves relevant context from indexed messages
   - Generates answer using Ollama
+- **Phase 3**: Combines results
+  - If both policy and RAG matched → returns both results
+  - If only one matched → returns that result
+  - Provides comprehensive response with policy actions and historical context
 
 ### 3. Parser Engine (`parser/parserEngine.js`)
-- Policy-based parsing (regex patterns)
-- LLM-based parsing (fallback)
+- **Policy-based parsing** (regex patterns)
+  - Loads policies from `config/policies.json` (organization-specific)
+  - Each organization can customize policies without code changes
+  - Policies are pluggable via `POLICIES_PATH` environment variable
+  - Supports multiple alert types with pattern matching and extraction rules
+- **LLM-based parsing** (fallback)
+  - Uses Ollama when policy parsing fails
+  - Handles novel alert formats not covered by policies
 - Returns structured alert data
 
 ### 4. Decision Engine (`decision/decide.js`)
@@ -82,8 +145,16 @@ The project now uses `src/server.js` as the unified entry point that handles:
 
 ### 6. RAG System (`rag/`)
 - `retrieve.js` - Searches indexed chunks
+  - **Slack**: Filters by `channel_id` for channel-specific context
+  - **Web UI**: Searches all channels when `channel_id` is null
 - `prompt.js` - Builds prompts for LLM
 - `ollama.js` - Interfaces with Ollama
+
+**RAG Channel Filtering:**
+- The `searchSimilar()` function in `db/slackChunksRepo.js` handles channel filtering
+- When `channel_id` is provided (Slack), it filters: `WHERE channel_id = $2`
+- When `channel_id` is null/undefined (Web UI), it searches all: no WHERE clause
+- This ensures Slack users only see relevant channel history, while Web UI provides comprehensive cross-channel context
 
 ## Running the Server
 
@@ -116,7 +187,9 @@ Required:
 Optional:
 - `PORT` - Server port (default: 3000)
 - `OLLAMA_BASE_URL` - Ollama URL (default: http://localhost:11434)
+  - **Note**: Should point to internal/local Ollama instance, not external APIs
 - `OLLAMA_EMBED_MODEL` - Embedding model (default: nomic-embed-text)
 - `OLLAMA_CHAT_MODEL` - Chat model (default: llama3.1)
 - `ENABLE_MCP` - Enable MCP actions (default: false)
 
+**Data Privacy Note**: All LLM operations use local Ollama. No data is sent to external LLM services (OpenAI, Anthropic, etc.) to ensure internal data privacy and prevent training of public models with your organization's data.

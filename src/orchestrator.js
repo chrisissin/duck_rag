@@ -8,13 +8,14 @@ import { ollamaChat } from "./rag/ollama.js";
 /**
  * Combined Logic: 
  * 1. Try Parser (Regex/LLM Policy)
- * 2. If matched, get Decision & Format Action
- * 3. If no match, fallback to RAG Chat History
+ * 2. Always run RAG to get context from Slack history
+ * 3. Return both results if available
  */
 export async function processIncomingMessage({ text, channel_id }) {
   // --- PHASE 1: PARSER ENGINE ---
   // Uses your existing parserEngine.js logic 
   const parseResult = await parseAlert(text);
+  let policyResult = null;
 
   if (parseResult.matched) {
     // Make decision (AUTO_REPLACE vs NEEDS_APPROVAL)
@@ -27,31 +28,63 @@ export async function processIncomingMessage({ text, channel_id }) {
       policy: parseResult.policy 
     });
     
-    return {
+    policyResult = {
       source: "policy_engine",
       text: report.summary,
       data: report
     };
   }
 
-  // --- PHASE 2: RAG FALLBACK ---
-  // If text isn't an alert, look through Slack history
+  // --- PHASE 2: RAG (Always run, even if policy matched) ---
+  // Always look through Slack history for context
   const contexts = await retrieveContexts({ channel_id, question: text });
+  let ragResult = null;
   
   if (contexts.length > 0) {
     const prompt = buildRagPrompt({ question: text, contexts });
     const answer = await ollamaChat({ prompt });
     
-    return {
+    ragResult = {
       source: "rag_history",
       text: answer || "I found history but couldn't generate a response.",
       data: null
     };
   }
 
+  // --- COMBINE RESULTS ---
+  // If both policy and RAG matched, combine them
+  if (policyResult && ragResult) {
+    return {
+      source: "both",
+      text: `${policyResult.text}\n\n--- Additional Context from Slack History ---\n\n${ragResult.text}`,
+      policy_result: policyResult,
+      rag_result: ragResult,
+      data: policyResult.data
+    };
+  }
+  
+  // If only policy matched
+  if (policyResult) {
+    return {
+      ...policyResult,
+      rag_result: null
+    };
+  }
+  
+  // If only RAG matched
+  if (ragResult) {
+    return {
+      ...ragResult,
+      policy_result: null
+    };
+  }
+
+  // Neither matched
   return {
     source: "none",
     text: "I couldn't identify an action or find relevant history to answer that.",
+    policy_result: null,
+    rag_result: null,
     data: null
   };
 }

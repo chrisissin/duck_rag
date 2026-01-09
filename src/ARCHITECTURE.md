@@ -188,7 +188,7 @@ JSON Response → {
 
 - `POLICIES_PATH`: Path to policies.json file (default: `config/policies.json`)
 - `OLLAMA_URL`: URL of the Ollama server (default: `http://localhost:11434`)
-- `OLLAMA_MODEL`: Model name to use for LLM parsing (default: `llama3`)
+- `OLLAMA_MODEL`: Model name to use for LLM parsing (default: `llama3.1`)
 - `ENABLE_MCP`: Set to `"true"` to enable MCP automation
 - `MCP_SERVER_URL`: URL of the MCP server endpoint
 - `MCP_AUTH_TOKEN`: Optional authentication token for MCP server
@@ -198,7 +198,7 @@ JSON Response → {
 - **express**: Web server framework
 - **zod**: Schema validation library
 
-**Note**: LLM fallback requires Ollama to be running locally. Install from [ollama.ai](https://ollama.ai) and pull a model (e.g., `ollama pull llama3`).
+**Note**: LLM fallback requires Ollama to be running locally. Install from [ollama.ai](https://ollama.ai) and pull a model (e.g., `ollama pull llama3.1`).
 
 ## Extensibility
 

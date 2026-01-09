@@ -68,20 +68,41 @@ export async function upsertChunk(chunk) {
 
 /**
  * Search similar chunks, filtered by channel_id (safe default).
+ * Falls back to selecting all chunks if channel_id is null/undefined.
  */
 export async function searchSimilar({ channel_id, queryEmbedding, topK }) {
+  //console.log("Searching similar chunks for channel_id ", channel_id, " and queryEmbedding ", queryEmbedding, " and topK ", topK);
   return withClient(async (client) => {
     const embeddingStr = `[${queryEmbedding.join(",")}]`;
-    const q = `
-      SELECT
-        id, text, channel_id, channel_name, thread_ts, start_ts, end_ts,
-        1 - (embedding <=> $1::vector) AS similarity
-      FROM slack_chunks
-      WHERE channel_id = $2
-      ORDER BY embedding <=> $1::vector
-      LIMIT $3;
-    `;
-    const res = await client.query(q, [embeddingStr, channel_id, topK]);
+    
+    // If channel_id is provided, filter by it; otherwise select all chunks
+    let q;
+    let params;
+    
+    if (channel_id && channel_id !== "nochannel-web-ui") {
+      q = `
+        SELECT
+          id, text, channel_id, channel_name, thread_ts, start_ts, end_ts,
+          1 - (embedding <=> $1::vector) AS similarity
+        FROM slack_chunks
+        WHERE channel_id = $2
+        ORDER BY embedding <=> $1::vector
+        LIMIT $3;
+      `;
+      params = [embeddingStr, channel_id, topK];
+    } else {
+      q = `
+        SELECT
+          id, text, channel_id, channel_name, thread_ts, start_ts, end_ts,
+          1 - (embedding <=> $1::vector) AS similarity
+        FROM slack_chunks
+        ORDER BY embedding <=> $1::vector
+        LIMIT $2;
+      `;
+      params = [embeddingStr, topK];
+    }
+    
+    const res = await client.query(q, params);
     return res.rows;
   });
 }

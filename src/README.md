@@ -18,8 +18,8 @@ For LLM fallback parsing, you'll need Ollama running locally:
 
 ```bash
 # Install Ollama from https://ollama.ai
-# Then pull a model (e.g., llama3)
-ollama pull llama3
+# Then pull a model (e.g., llama3.1)
+ollama pull llama3.1
 ```
 
 ### Running the Application
@@ -47,8 +47,8 @@ POLICIES_PATH=config/policies.json
 # Ollama Configuration (for LLM fallback parsing)
 # Defaults to http://localhost:11434 if not set
 OLLAMA_URL=http://localhost:11434
-# Default model is "llama3" if not set
-OLLAMA_MODEL=llama3
+# Default model is "llama3.1" if not set
+OLLAMA_MODEL=llama3.1
 
 # Enable MCP automation (set to "true" to enable)
 ENABLE_MCP=false
