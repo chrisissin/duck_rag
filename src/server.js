@@ -257,13 +257,38 @@ app.action("approve_action", async ({ ack, body, client, logger }) => {
     const value = JSON.parse(body.actions[0].value);
     const { action, parsed, decision } = value;
     
+    // Check if action is a gcloud command (starts with "gcloud")
+    const isGcloudCommand = action && action.trim().startsWith("gcloud");
     
     // Execute the action via MCP
-    const { executeMCPAction } = await import("./report/mcpClient.js");
+    const { executeMCPGcloudCommand, executeMCPAction } = await import("./report/mcpClient.js");
     let executionResult;
     
     try {
-      executionResult = await executeMCPAction(action, parsed);
+      if (isGcloudCommand) {
+        // Use the new gcloud command execution
+        executionResult = await executeMCPGcloudCommand(action);
+      } else {
+        // Fallback to legacy executeMCPAction for non-gcloud commands
+        executionResult = await executeMCPAction(action, parsed);
+      }
+      
+      // Format the response message
+      let resultText = `✅ *Action Approved and Executed*\n\n*Action:* \`${action}\`\n\n*Result:* ${executionResult.success ? "✅ Success" : "❌ Failed"}`;
+      
+      if (executionResult.output) {
+        // Truncate long output for Slack (max ~3000 chars per block)
+        const output = executionResult.output.length > 2000 
+          ? executionResult.output.substring(0, 2000) + "\n... (truncated)"
+          : executionResult.output;
+        resultText += `\n\n*Output:*\n\`\`\`${output}\`\`\``;
+      } else if (executionResult.result) {
+        resultText += `\n\n*Details:*\n\`\`\`${JSON.stringify(executionResult.result, null, 2)}\`\`\``;
+      }
+      
+      if (executionResult.error) {
+        resultText += `\n\n*Error:* ${executionResult.error}`;
+      }
       
       await client.chat.update({
         channel: body.channel.id,
@@ -274,7 +299,7 @@ app.action("approve_action", async ({ ack, body, client, logger }) => {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: `✅ *Action Approved and Executed*\n\n*Action:* \`${action}\`\n\n*Result:* ${executionResult.success ? "✅ Success" : "❌ Failed"}\n${executionResult.result ? `\n\`\`\`${JSON.stringify(executionResult.result, null, 2)}\`\`\`` : ""}`
+              text: resultText
             }
           }
         ]

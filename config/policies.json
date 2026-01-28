@@ -33,7 +33,7 @@
         "parse_method": "policy"
       },
       
-      "action_template": "gcloud compute ssh {instance_name} --zone=<ZONE> --project={project_id} --command='sudo du -hd2 / | sort -rh | head -n 10' ",
+      "action_template": "gcloud compute ssh {instance_name}  --project={project_id} --internal-ip --command='sudo du -hd2 / | sort -rh | head -n 10' ",
       "summary_template": "Disk utilization below threshold. Please take following actions to see what's taking up space for example :\n\n$ sudo du -hd2 / | sort -rh | head -n 10\n27G\t/var\n25G\t/var/log <-- This is the issue\n\n{action}",
       "default_decision": "AUTO_REPLACE",
       "decision_rules": [

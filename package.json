@@ -8,6 +8,7 @@
     "server": "node src/server.js",
     "bot": "node src/bot.js",
     "backfill:all": "node src/indexer/backfill_all.js",
+    "backfill:channel": "node src/indexer/backfill_channel.js",
     "sync:once": "node src/indexer/sync_once.js",
     "sync:cron": "node src/indexer/sync_cron.js",
     "mcp:server": "node src/services/automation/gcpMcpServer.js"

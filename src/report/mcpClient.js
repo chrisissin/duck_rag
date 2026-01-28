@@ -79,6 +79,7 @@ async function getMCPClient() {
 
 /**
  * Execute MCP action by calling the MCP server tools
+ * This is the legacy function for instance recreation - kept for backward compatibility
  */
 export async function executeMCPAction(action, parsed) {
   // Check if MCP is enabled
@@ -142,6 +143,59 @@ export async function executeMCPAction(action, parsed) {
     return {
       success: false,
       error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
+/**
+ * Execute a gcloud command from an action template via MCP
+ * This is the new function for executing arbitrary gcloud commands
+ * 
+ * @param {string} gcloudCommand - The full gcloud command to execute (from action_template)
+ * @returns {Promise<Object>} - Execution result with success status and output
+ */
+export async function executeMCPGcloudCommand(gcloudCommand) {
+  // Check if MCP is enabled
+  if (process.env.ENABLE_MCP !== "true") {
+    throw new Error("MCP is not enabled. Set ENABLE_MCP=true to enable.");
+  }
+
+  if (!gcloudCommand || !gcloudCommand.trim()) {
+    throw new Error("gcloud command is required");
+  }
+
+  try {
+    const client = await getMCPClient();
+
+    // Execute the gcloud command via MCP
+    const executeResult = await client.callTool({
+      name: "execute_gcloud_command",
+      arguments: {
+        command: gcloudCommand.trim()
+      }
+    });
+
+    if (executeResult.isError || !executeResult.content || executeResult.content.length === 0) {
+      throw new Error(`MCP execution failed: ${executeResult.content?.[0]?.text || "Unknown error"}`);
+    }
+
+    const executionResultText = executeResult.content[0].text;
+    const executionResult = JSON.parse(executionResultText);
+    
+    return {
+      success: executionResult.success !== false && !executionResult.error,
+      result: executionResult,
+      command: executionResult.command || gcloudCommand,
+      output: executionResult.stdout || executionResult.stderr || "",
+      error: executionResult.error || null,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+      command: gcloudCommand,
       timestamp: new Date().toISOString()
     };
   }
