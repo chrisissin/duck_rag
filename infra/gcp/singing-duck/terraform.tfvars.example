@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and adjust.
+# project_id must match your GCP project (e.g. singing-duck).
+
+project_id = "singing-duck"
+region     = "us-central1"
+db_tier    = "db-f1-micro"
+db_name    = "slack_rag"
+db_user    = "slack_rag_app"
+
+# After first apply, set image and re-apply (or use deploy script to update image):
+# cloud_run_agent_image = "gcr.io/singing-duck/slack-rag-bot"
+# cloud_run_job_image   = "gcr.io/singing-duck/slack-rag-bot"
+
+# Ollama: create managed Ollama Cloud Run service (default true)
+create_ollama_service = true
+# ollama_image   = "ollama/ollama"
+# ollama_cpu     = "2"
+# ollama_memory  = "4Gi"
+
+# If you use an external Ollama instead, set create_ollama_service = false and:
+# ollama_base_url = "https://your-ollama-service-xxxx.run.app"
+
+# Every 30 min (slack rate limits; job needs ~15-25 min with channel delays)
+indexer_schedule = "*/30 * * * *"

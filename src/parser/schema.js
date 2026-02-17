@@ -19,6 +19,9 @@ export const ParsedAlertSchema = z.object({
   service_name: z.string().nullable().optional(),
   schedule_name: z.string().nullable().optional(),
   schedule_expression: z.string().nullable().optional(),
+  ticket_number: z.string().nullable().optional(),
+  schedule: z.string().nullable().optional(),
+  duration: z.string().nullable().optional(),
   duration_sec: z.string().nullable().optional(),
   min_replicas: z.string().nullable().optional(),
   // Optional fields for add memory to VM

@@ -4,6 +4,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { readFileSync, writeFileSync, unlinkSync } from "fs";
+import { join } from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const execAsync = promisify(exec);
 const server = new Server(
@@ -25,31 +32,6 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
-      {
-        name: "discover_instance_metadata",
-        description: "Finds the project, zone, and MIG name for a specific instance",
-        inputSchema: {
-          type: "object",
-          properties: {
-            instanceName: { type: "string", description: "Instance name to look up" }
-          },
-          required: ["instanceName"]
-        }
-      },
-      {
-        name: "execute_recreate_instance",
-        description: "Recreates an instance in a Managed Instance Group",
-        inputSchema: {
-          type: "object",
-          properties: {
-            projectId: { type: "string", description: "GCP project ID" },
-            zone: { type: "string", description: "GCP zone" },
-            migName: { type: "string", description: "Managed Instance Group name" },
-            instanceName: { type: "string", description: "Instance name to recreate" }
-          },
-          required: ["projectId", "zone", "migName", "instanceName"]
-        }
-      },
       {
         name: "execute_gcloud_command",
         description: "Executes an arbitrary gcloud command. Use this for executing gcloud commands from action templates.",
@@ -141,6 +123,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["environment", "serviceName", "currentMachineType", "targetMachineType"]
         }
+      },
+      {
+        name: "generate_scaling_schedule_yaml_diff",
+        description: "Generates a YAML diff for scaling schedule configuration from SCALEPRREQUEST format. Takes schedule (mm hh dd MM * YYYY), duration in seconds, and name.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            schedule: {
+              type: "string",
+              description: "Schedule in format 'mm hh dd MM * YYYY' (e.g., '30 17 4 02 * 2026' for 17:30 Feb 4th 2026 UTC)"
+            },
+            duration: {
+              type: "number",
+              description: "Duration in seconds (e.g., 7200 for 2 hours)"
+            },
+            name: {
+              type: "string",
+              description: "Scale up name (e.g., 'big sale')"
+            }
+          },
+          required: ["schedule", "duration", "name"]
+        }
       }
     ]
   };
@@ -148,68 +152,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-
-  if (name === "discover_instance_metadata") {
-    try {
-      const { instanceName } = args;
-      
-      // Use gcloud command to discover instance metadata
-      const gcloudCmd = `gcloud compute instances describe ${instanceName} --format="json(zone,name)" --project=$(gcloud config get-value project 2>/dev/null || echo '')`;
-      
-      try {
-        const { stdout } = await execAsync(gcloudCmd);
-        const instanceInfo = JSON.parse(stdout);
-        const zone = instanceInfo.zone ? instanceInfo.zone.split('/').pop() : 'unknown';
-        
-        // Try to get project ID from gcloud config
-        const { stdout: projectId } = await execAsync('gcloud config get-value project 2>/dev/null || echo ""');
-        
-        // MIG name is harder to get via gcloud, so we'll return unknown for now
-        const migName = "unknown";
-        
-        return {
-          content: [{ type: "text", text: JSON.stringify({ zone, migName, projectId: projectId.trim() || null }) }]
-        };
-      } catch (gcloudErr) {
-        // Fallback: return error
-        return {
-          content: [{ type: "text", text: JSON.stringify({ error: `Failed to discover instance: ${gcloudErr.message}. Make sure gcloud is configured and the instance exists.` }) }],
-          isError: true
-        };
-      }
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: JSON.stringify({ error: err.message }) }],
-        isError: true
-      };
-    }
-  }
-
-  if (name === "execute_recreate_instance") {
-    try {
-      const { projectId, zone, migName, instanceName } = args;
-      
-      // Use gcloud command to recreate instance
-      const gcloudCmd = `gcloud compute instance-groups managed recreate-instances ${migName} --instances=${instanceName} --zone=${zone}${projectId ? ` --project=${projectId}` : ''}`;
-      
-      try {
-        const { stdout, stderr } = await execAsync(gcloudCmd);
-        return {
-          content: [{ type: "text", text: JSON.stringify({ success: true, message: `Successfully triggered recreation for ${instanceName} in ${migName}`, output: stdout || stderr }) }]
-        };
-      } catch (gcloudErr) {
-        return {
-          content: [{ type: "text", text: JSON.stringify({ error: `GCP Error: ${gcloudErr.message}`, stderr: gcloudErr.stderr || "" }) }],
-          isError: true
-        };
-      }
-    } catch (err) {
-      return {
-        content: [{ type: "text", text: JSON.stringify({ error: `GCP Error: ${err.message}` }) }],
-        isError: true
-      };
-    }
-  }
 
   if (name === "execute_gcloud_command") {
     try {
@@ -259,10 +201,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "execute_gcloud_scale_up") {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [MCP Server] execute_gcloud_scale_up called`);
+    console.log(`[${timestamp}] [MCP Server] Arguments:`, JSON.stringify(args, null, 2));
+    
     try {
       const { serviceName, gcloudCommand } = args;
       
       if (!gcloudCommand || !gcloudCommand.trim()) {
+        console.log(`[${timestamp}] [MCP Server] ERROR: gcloud command is required`);
         return {
           content: [{ 
             type: "text", 
@@ -277,18 +224,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Use the command directly from policy (no template replacement)
       const gcloudCmd = gcloudCommand.trim();
       
-      console.log(`[MCP Server] Executing scale-up command for service: ${serviceName || 'unknown'}`);
-      console.log(`[MCP Server] Command: ${gcloudCmd}`);
+      console.log(`[${timestamp}] [MCP Server] Executing scale-up command for service: ${serviceName || 'unknown'}`);
+      console.log(`[${timestamp}] [MCP Server] Command: ${gcloudCmd}`);
       
       // For now, return the command that would be executed
       // Uncomment the execAsync call below when you're ready to execute
       /*
+      console.log(`[${timestamp}] [MCP Server] About to execute command via execAsync...`);
       const { stdout, stderr } = await execAsync(gcloudCmd, {
         maxBuffer: 10 * 1024 * 1024,
         timeout: 300000
       });
+      console.log(`[${timestamp}] [MCP Server] Command executed. stdout length: ${stdout?.length || 0}, stderr length: ${stderr?.length || 0}`);
       */
       
+      console.log(`[${timestamp}] [MCP Server] Returning success response (command not actually executed - placeholder mode)`);
       return {
         content: [{ 
           type: "text", 
@@ -411,6 +361,124 @@ index cce6ec39..d03993cc 100644
           type: "text", 
           text: JSON.stringify({ 
             error: `Failed to generate machine type diff: ${err.message}` 
+          }) 
+        }],
+        isError: true
+      };
+    }
+  }
+
+  if (name === "generate_scaling_schedule_yaml_diff") {
+    try {
+      const { schedule, duration, name: scheduleName } = args;
+      // Hardcoded defaults
+      const serviceName = "api";
+      const environment = "production";
+      
+      if (!schedule || !duration || !scheduleName) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify({ 
+              error: "Missing required parameters: schedule, duration, name" 
+            }) 
+          }],
+          isError: true
+        };
+      }
+      
+      // Use the schedule string directly without validation
+      // User input: "mm hh dd MM * YYYY" format (e.g., "30 17 4 02 * 2026")
+      const scheduleString = schedule.trim();
+      
+      // Generate the YAML content
+      const fileName = `api_disconnect_gacha_login_tmt.yaml`;
+      const yamlContent = `---
+# ${scheduleName}
+
+- name                  : ${scheduleName}
+  schedule              : ${scheduleString}
+  duration_sec          : ${duration}
+  min_required_replicas : \${sch_high}
+  time_zone             : Etc/UTC`;
+      
+      // Generate git diff format
+      const diff = `diff --git a/production/scaling_schedules/${fileName} b/production/scaling_schedules/${fileName}
+index 71c5e0f35504..f40f522f9942 100644
+--- a/production/scaling_schedules/${fileName}
++++ b/production/scaling_schedules/${fileName}
+@@ -1 +1,38 @@
+ ---
++# ${scheduleName}
++
++- name                  : ${scheduleName}
++  schedule              : ${scheduleString}
++  duration_sec          : ${duration}
++  min_required_replicas : \${sch_high}
++  time_zone             : Etc/UTC`;
+
+      // Read the script template
+      const scriptPath = join(__dirname, "../../../config/scale_pr.sh");
+      let scriptContent = readFileSync(scriptPath, "utf-8");
+      
+      // Replace placeholders with user input
+      const ticketNumber = scheduleName.trim();
+      scriptContent = scriptContent.replace(/REPLACEWITHSCHEDULENAME/g, ticketNumber);
+      scriptContent = scriptContent.replace(/REPLACEWITHUSERINPUTSCHEDULE/g, scheduleString);
+      scriptContent = scriptContent.replace(/REPLACEWITHUSERINPUTDURATION/g, String(duration));
+      scriptContent = scriptContent.replace(/# big sale/g, `# ${ticketNumber}`);
+      scriptContent = scriptContent.replace(/feat: append big sale scaling schedule/g, `feat: append ${ticketNumber} scaling schedule`);
+      
+      // Write to a temporary script file
+      const tempScriptPath = join(__dirname, "../../../config/scale_pr_temp.sh");
+      writeFileSync(tempScriptPath, scriptContent, { mode: 0o755 });
+      
+      const timestamp = new Date().toISOString();
+      console.log(`[${timestamp}] [MCP Server] Executing script with replacements:`);
+      console.log(`[${timestamp}] [MCP Server]   BRANCH_NAME: ${ticketNumber}`);
+      console.log(`[${timestamp}] [MCP Server]   SCHEDULE: ${scheduleString}`);
+      console.log(`[${timestamp}] [MCP Server]   DURATION: ${duration}`);
+      
+      // Execute the script
+      const { stdout, stderr } = await execAsync(`bash ${tempScriptPath}`, {
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+        timeout: 300000 // 5 minute timeout
+      });
+      
+      // Clean up temp script
+      try {
+        unlinkSync(tempScriptPath);
+      } catch (cleanupErr) {
+        console.warn(`[${timestamp}] [MCP Server] Failed to cleanup temp script: ${cleanupErr.message}`);
+      }
+      
+      console.log(`[${timestamp}] [MCP Server] Script execution completed`);
+      console.log(`[${timestamp}] [MCP Server] Stdout length: ${stdout.length}, Stderr length: ${stderr?.length || 0}`);
+      
+      // Combine stdout and stderr for full output
+      const fullOutput = stderr ? `${stdout}\n${stderr}` : stdout;
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: JSON.stringify({ 
+            success: true, 
+            ticketNumber,
+            schedule: scheduleString,
+            duration,
+            output: fullOutput,
+            message: "Script execution completed" 
+          }) 
+        }]
+      };
+    } catch (err) {
+      return {
+        content: [{ 
+          type: "text", 
+          text: JSON.stringify({ 
+            error: `Failed to execute scale PR script: ${err.message}`,
+            stderr: err.stderr || "",
+            stdout: err.stdout || "" 
           }) 
         }],
         isError: true

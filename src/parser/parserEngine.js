@@ -115,16 +115,16 @@ function tryPolicyParsing(text) {
     const extracted = {};
     let atLeastOnePatternMatched = false;
     
-    // Try to match ANY pattern in the policy (OR logic, not AND)
-    // This allows multiple patterns as alternatives
+    // Try to match patterns in the policy
+    // For policies that need multiple fields (like scalepr_request), we need to match ALL patterns
+    // For policies with alternative patterns, we match ANY pattern
+    // Strategy: Try all patterns and collect all matches
     for (const pattern of policy.patterns) {
       const result = applyPattern(pattern, text);
       if (result !== null) {
         atLeastOnePatternMatched = true;
         Object.assign(extracted, result);
-        // Once we find a match, we can break (or continue to collect all matches)
-        // For now, break on first match for efficiency
-        break;
+        // Don't break - continue to collect all matches for policies that need multiple fields
       }
     }
     
@@ -265,14 +265,9 @@ async function tryLLMWithModel(ollamaUrl, model, prompt) {
 
 async function tryLLMParsing(text) {
   // Get Ollama configuration
-  const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434";
-  let primaryModel = process.env.OLLAMA_MODEL || "llama3.1";
-  
-  // Ensure model name includes :latest tag if no tag is specified
-  if (!primaryModel.includes(":")) {
-    primaryModel = `${primaryModel}:latest`;
-  }
-  
+  const ollamaUrl = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_URL || "http://localhost:11434";
+  const primaryModel = process.env.OLLAMA_MODEL || "llama3.1";
+
   // First, verify Ollama is accessible and get available models
   let availableModels = [];
   try {

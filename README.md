@@ -81,6 +81,17 @@ ollama pull llama3.1
 
 ---
 
+## Deployment (GCP + CI/CD)
+
+To run on **Google Cloud (Cloud Run)** with Terraform and **GitHub Actions CI/CD**, see:
+
+- **[docs/CICD.md](docs/CICD.md)** — pipeline overview, how to set up `GCP_SA_KEY`, and **architecture answers:**
+  - **MCP server and web server** run in the **same Cloud Run service** (one container: `node src/server.js`; the MCP server is spawned as a child process when needed).
+  - **All required services start automatically** — agent and Ollama scale on request; the indexer runs on a schedule via Cloud Scheduler; no manual start.
+- **[infra/gcp/singing-duck/README.md](infra/gcp/singing-duck/README.md)** — create project, Terraform, secrets, deploy scripts.
+
+---
+
 ## Setup
 
 ### 1) Start Postgres (pgvector)

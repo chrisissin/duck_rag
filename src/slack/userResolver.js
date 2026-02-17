@@ -3,6 +3,8 @@
  * - Resolves user IDs like U123... to username via users.info
  * - Also handles bot IDs (B...) best-effort
  */
+import { withSlackRetry } from "./retry.js";
+
 export class UserResolver {
   /**
    * @param {import("@slack/web-api").WebClient} web
@@ -23,7 +25,7 @@ export class UserResolver {
 
     // Slack user IDs start with U/W; bot users can still be returned by users.info.
     try {
-      const res = await this.web.users.info({ user: userId });
+      const res = await withSlackRetry(() => this.web.users.info({ user: userId }), { operation: "users.info" });
       const user = res?.user;
       const name = user?.name || user?.profile?.display_name || user?.profile?.real_name;
       const normalized = (name && String(name).trim()) ? String(name).trim() : userId;

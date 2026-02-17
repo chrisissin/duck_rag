@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { ensureSecrets } from "../db/ensureSecrets.js";
 import { slackClient } from "../slack/client.js";
 import { UserResolver } from "../slack/userResolver.js";
 import { listAllPublicChannels, fetchHistory, fetchThreadReplies } from "./slackFetch.js";
@@ -14,6 +15,7 @@ import { upsertChunk, getCursor, setCursor } from "../db/slackChunksRepo.js";
  * Safe default: still indexes only what the bot can see.
  */
 async function main() {
+  await ensureSecrets();
   const web = slackClient();
   const resolver = new UserResolver(web);
 
@@ -23,11 +25,17 @@ async function main() {
   const limit = parseInt(process.env.HISTORY_PAGE_LIMIT || "200", 10);
   const maxMessages = parseInt(process.env.MAX_MESSAGES_PER_WINDOW || "20", 10);
   const maxMinutes = parseInt(process.env.MAX_WINDOW_MINUTES || "10", 10);
+  const channelDelayMs = parseInt(process.env.SLACK_CHANNEL_DELAY_MS || "12000", 10);
+  const threadDelayMs = parseInt(process.env.SLACK_THREAD_DELAY_MS || "2000", 10);
 
   const channels = await listAllPublicChannels(web);
   console.log(`Syncing ${channels.length} channels...`);
 
-  for (const ch of channels) {
+  for (let i = 0; i < channels.length; i++) {
+    const ch = channels[i];
+    if (i > 0 && channelDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, channelDelayMs));
+    }
     const channel_id = ch.id;
     const channel_name = ch.name;
 
@@ -66,7 +74,10 @@ async function main() {
       nonThread.push(m);
     }
 
+    let threadIdx = 0;
     for (const thread_ts of threadRoots) {
+      if (threadIdx > 0 && threadDelayMs > 0) await new Promise((r) => setTimeout(r, threadDelayMs));
+      threadIdx++;
       const threadMsgs = await fetchThreadReplies(web, channel_id, thread_ts, { limit });
       if (!threadMsgs?.length) continue;
 
@@ -80,8 +91,13 @@ async function main() {
       });
 
       if (!chunk.text?.trim()) continue;
-      const embedding = await ollamaEmbed(chunk.text);
-      await upsertChunk({ ...chunk, embedding });
+      try {
+        const embedding = await ollamaEmbed(chunk.text);
+        await upsertChunk({ ...chunk, embedding });
+      } catch (e) {
+        console.error(`[indexer] Ollama embed failed for #${channel_name} thread ${thread_ts}:`, e?.message || e);
+        throw e;
+      }
     }
 
     const windows = await buildWindows({
@@ -96,8 +112,13 @@ async function main() {
 
     for (const w of windows) {
       if (!w.text?.trim()) continue;
-      const embedding = await ollamaEmbed(w.text);
-      await upsertChunk({ ...w, embedding });
+      try {
+        const embedding = await ollamaEmbed(w.text);
+        await upsertChunk({ ...w, embedding });
+      } catch (e) {
+        console.error(`[indexer] Ollama embed failed for #${channel_name} window:`, e?.message || e);
+        throw e;
+      }
     }
 
     const latest_ts = newMessages[newMessages.length - 1]?.ts;

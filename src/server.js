@@ -11,6 +11,23 @@ import { normalizeSlackText } from "./slack/normalize.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/** Slack limit for block element value is 2001 characters. Truncate action so JSON fits. */
+function makeButtonValue(obj, maxLength = 2000) {
+  let s = JSON.stringify(obj);
+  if (s.length <= maxLength) return s;
+  if (typeof obj.action === "string" && obj.action.length > 0) {
+    const needToCut = s.length - maxLength + 30;
+    const maxAction = Math.max(0, (obj.action?.length ?? 0) - needToCut);
+    obj = { ...obj, action: obj.action.substring(0, maxAction) + (obj.action.length > maxAction ? "…" : "") };
+    s = JSON.stringify(obj);
+  }
+  if (s.length > maxLength) {
+    const { action: _a, ...rest } = obj;
+    s = JSON.stringify(rest);
+  }
+  return s;
+}
+
 // Validate signing secret is set
 if (!process.env.SLACK_SIGNING_SECRET) {
   console.error('❌ ERROR: SLACK_SIGNING_SECRET is not set in .env file');
@@ -85,9 +102,13 @@ app.event("app_mention", async ({ event, client, logger }) => {
     const queryPreview = cleanText.length > 100 ? cleanText.substring(0, 100) + "..." : cleanText;
     console.log(`[${timestamp}] 📥 Query received from Slack (channel: ${event.channel}): "${queryPreview}"`);
 
+    // Use thread_ts for conversation state tracking
+    const threadTs = event.thread_ts || event.ts;
+    
     const result = await processIncomingMessage({ 
       text: cleanText, 
-      channel_id: event.channel 
+      channel_id: event.channel,
+      thread_ts: threadTs
     });
 
     const outputTimestamp = new Date().toISOString();
@@ -96,8 +117,12 @@ app.event("app_mention", async ({ event, client, logger }) => {
     console.log(`[${outputTimestamp}] 📤 Response sent to Slack (channel: ${event.channel}, source: ${sourceInfo}): "${outputPreview}"`);
 
     // Format message for Slack - if both results, use a cleaner format
+    // Policy result should come first, then RAG history
     let messageText = result.text || "I couldn't process that request.";
     if (result.source === "both" && result.policy_result && result.rag_result) {
+      messageText = `*Policy Engine Result:*\n${result.policy_result.text}\n\n*Additional Context from Slack History:*\n${result.rag_result.text}`;
+    } else if (result.source === "both" && result.rag_result && result.policy_result) {
+      // Ensure policy result comes first even if order is different
       messageText = `*Policy Engine Result:*\n${result.policy_result.text}\n\n*Additional Context from Slack History:*\n${result.rag_result.text}`;
     }
 
@@ -139,22 +164,60 @@ app.event("app_mention", async ({ event, client, logger }) => {
     
     if (needsApproval) {
       // Build blocks for the message
-      const blocks = [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: messageText
-          }
+      // If we have both policy and RAG results, split them so policy comes first
+      let policyText = messageText;
+      let ragText = null;
+      
+      if (result.source === "both" && result.policy_result && result.rag_result) {
+        // Use policy result text only (without RAG) for the main message
+        policyText = result.policy_result.text;
+        ragText = result.rag_result.text;
+      }
+      
+      // Helper function to split long text into multiple blocks (Slack limit is 3000 chars per block)
+      const splitIntoBlocks = (text, maxLength = 2900) => {
+        if (!text || text.length <= maxLength) {
+          return [{ type: "section", text: { type: "mrkdwn", text } }];
         }
-      ];
+        
+        const blocks = [];
+        let remaining = text;
+        
+        while (remaining.length > 0) {
+          if (remaining.length <= maxLength) {
+            blocks.push({
+              type: "section",
+              text: { type: "mrkdwn", text: remaining }
+            });
+            break;
+          }
+          
+          // Try to split at a newline near the limit
+          const chunk = remaining.substring(0, maxLength);
+          const lastNewline = chunk.lastIndexOf('\n');
+          const splitPoint = lastNewline > maxLength * 0.8 ? lastNewline + 1 : maxLength;
+          
+          blocks.push({
+            type: "section",
+            text: { type: "mrkdwn", text: remaining.substring(0, splitPoint) }
+          });
+          
+          remaining = remaining.substring(splitPoint);
+        }
+        
+        return blocks;
+      };
+      
+      // Split policy text into blocks if it's too long
+      const blocks = splitIntoBlocks(policyText);
       
       // If we have multiple action options, show them separately
       if (hasMultipleOptions && !disableApprovalButtons) {
         // Add each action option as a separate section with its own button
-        result.data.actionOptions.forEach((option, idx) => {
+        for (let idx = 0; idx < result.data.actionOptions.length; idx++) {
+          const option = result.data.actionOptions[idx];
           const optionIsValid = isActionValid(option.action);
-          
+
           // Add section for this option
           blocks.push({
             type: "section",
@@ -176,7 +239,7 @@ app.event("app_mention", async ({ event, client, logger }) => {
                     text: `✅ Approve: ${option.label}`
                   },
                   style: "primary",
-                  value: JSON.stringify({
+                  value: makeButtonValue({
                     action: option.action,
                     actionTemplate: option.template,
                     actionLabel: option.label,
@@ -191,7 +254,7 @@ app.event("app_mention", async ({ event, client, logger }) => {
               ]
             });
           }
-        });
+        }
         
         // Add a single reject button at the end
         blocks.push({
@@ -237,8 +300,11 @@ app.event("app_mention", async ({ event, client, logger }) => {
                   text: "✅ Approve & Execute"
                 },
                 style: "primary",
-                value: JSON.stringify({
+                value: makeButtonValue({
                   action: result.data.action,
+                  actionTemplate: result.data.policy?.action_template || null,
+                  actionLabel: "Execute Action",
+                  gcloudCommandTemplate: result.data.policy?.gcloud_command_template || null,
                   parsed: result.data.parsed,
                   decision: result.data.decision,
                   message_ts: event.ts
@@ -252,7 +318,7 @@ app.event("app_mention", async ({ event, client, logger }) => {
                   text: "❌ Reject"
                 },
                 style: "danger",
-                value: JSON.stringify({
+                value: makeButtonValue({
                   action: result.data.action,
                   parsed: result.data.parsed,
                   message_ts: event.ts
@@ -262,6 +328,12 @@ app.event("app_mention", async ({ event, client, logger }) => {
             ]
           });
         }
+      }
+      
+      // Add RAG history at the end (after all action options)
+      if (ragText) {
+        const ragBlocks = splitIntoBlocks(`*Additional Context from Slack History:*\n${ragText}`);
+        blocks.push(...ragBlocks);
       }
       
       // Send message with or without approval buttons
@@ -303,15 +375,41 @@ app.event("app_mention", async ({ event, client, logger }) => {
       }
     } else {
       // Regular message - add button to search all channels if RAG was used
-      const blocks = [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: messageText
-          }
+      // Helper function to split long text into multiple blocks (Slack limit is 3000 chars per block)
+      const splitIntoBlocks = (text, maxLength = 2900) => {
+        if (!text || text.length <= maxLength) {
+          return [{ type: "section", text: { type: "mrkdwn", text } }];
         }
-      ];
+        
+        const blocks = [];
+        let remaining = text;
+        
+        while (remaining.length > 0) {
+          if (remaining.length <= maxLength) {
+            blocks.push({
+              type: "section",
+              text: { type: "mrkdwn", text: remaining }
+            });
+            break;
+          }
+          
+          // Try to split at a newline near the limit
+          const chunk = remaining.substring(0, maxLength);
+          const lastNewline = chunk.lastIndexOf('\n');
+          const splitPoint = lastNewline > maxLength * 0.8 ? lastNewline + 1 : maxLength;
+          
+          blocks.push({
+            type: "section",
+            text: { type: "mrkdwn", text: remaining.substring(0, splitPoint) }
+          });
+          
+          remaining = remaining.substring(splitPoint);
+        }
+        
+        return blocks;
+      };
+      
+      const blocks = splitIntoBlocks(messageText);
 
       // Add button to search all channels if RAG was used and we searched only this channel
       if (searchedChannelOnly) {
@@ -363,8 +461,13 @@ app.action("approve_action", async ({ ack, body, client, logger }) => {
     const value = JSON.parse(body.actions[0].value);
     const { action, actionTemplate, actionLabel, parsed, decision } = value;
     
+    // Debug: Log action template for troubleshooting
+    if (!actionTemplate) {
+      console.warn(`[Approval Handler] actionTemplate is missing. Value keys: ${Object.keys(value).join(', ')}`);
+    }
+    
     // Execute the action via MCP
-    const { executeMCPGcloudCommand, executeMCPAction, executeGcloudScaleUp } = await import("./report/mcpClient.js");
+    const { executeMCPGcloudCommand, executeGcloudScaleUp } = await import("./report/mcpClient.js");
     let executionResult;
     
     try {
@@ -405,13 +508,59 @@ app.action("approve_action", async ({ ack, body, client, logger }) => {
         });
         return; // Exit early since we've handled it
       }
+      else if (actionTemplate === "MCP:generate_scaling_schedule_yaml_diff") {
+        // Execute the scaling schedule script
+        const { generateScalingScheduleYamlDiff } = await import("./report/mcpClient.js");
+        
+        // Extract parameters from parsed data
+        const schedule = parsed.schedule || parsed.start || null;
+        const duration = parsed.duration || parsed.duration_sec || null;
+        const ticketNumber = parsed.ticket_number || parsed.name || parsed.schedule_name || null;
+        
+        if (!schedule || !duration || !ticketNumber) {
+          await client.chat.update({
+            channel: body.channel.id,
+            ts: body.message.ts,
+            text: body.message.text,
+            blocks: [
+              {
+                type: "section",
+                text: {
+                  type: "mrkdwn",
+                  text: `❌ *Execution Failed*\n\nMissing required parameters: schedule, duration, ticket_number`
+                }
+              }
+            ]
+          });
+          return;
+        }
+        
+        try {
+          executionResult = await generateScalingScheduleYamlDiff({
+            schedule,
+            duration: parseInt(duration, 10),
+            name: ticketNumber
+          });
+        } catch (error) {
+          executionResult = {
+            success: false,
+            error: error.message
+          };
+        }
+      }
       else if (action && action.trim().startsWith("gcloud")) {
         // Direct gcloud command execution
         executionResult = await executeMCPGcloudCommand(action);
-      } 
+      }
       else {
-        // Fallback to legacy executeMCPAction for non-gcloud commands
-        executionResult = await executeMCPAction(action, parsed);
+        // No valid action handler found
+        // Try to provide helpful error message
+        const actionType = actionTemplate ? `action template: ${actionTemplate}` : 
+                          (action ? `action: ${action.substring(0, 50)}...` : 'unknown action');
+        executionResult = {
+          success: false,
+          error: `No execution handler found for ${actionType}. Please check the action template configuration.`
+        };
       }
       
       // Format the response message

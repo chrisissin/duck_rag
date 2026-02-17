@@ -78,77 +78,6 @@ async function getMCPClient() {
 }
 
 /**
- * Execute MCP action by calling the MCP server tools
- * This is the legacy function for instance recreation - kept for backward compatibility
- */
-export async function executeMCPAction(action, parsed) {
-  // Check if MCP is enabled
-  if (process.env.ENABLE_MCP !== "true") {
-    throw new Error("MCP is not enabled. Set ENABLE_MCP=true to enable.");
-  }
-
-  try {
-    const instanceName = parsed.instance_name;
-    const projectId = parsed.project_id;
-    
-    if (!instanceName) {
-      throw new Error("Instance name is required for MCP action");
-    }
-
-    const client = await getMCPClient();
-
-    // First, discover instance metadata
-    const metadataResult = await client.callTool({
-      name: "discover_instance_metadata",
-      arguments: { instanceName }
-    });
-
-    if (metadataResult.isError || !metadataResult.content || metadataResult.content.length === 0) {
-      throw new Error(`Failed to discover instance metadata: ${metadataResult.content?.[0]?.text || "Unknown error"}`);
-    }
-
-    const metadataText = metadataResult.content[0].text;
-    const metadata = JSON.parse(metadataText);
-    if (metadata.error) {
-      throw new Error(`Failed to discover instance metadata: ${metadata.error}`);
-    }
-
-    const { zone, migName, projectId: discoveredProjectId } = metadata;
-    const finalProjectId = projectId || discoveredProjectId;
-
-    // Execute the recreate instance action
-    const executeResult = await client.callTool({
-      name: "execute_recreate_instance",
-      arguments: {
-        projectId: finalProjectId,
-        zone,
-        migName,
-        instanceName
-      }
-    });
-
-    if (executeResult.isError || !executeResult.content || executeResult.content.length === 0) {
-      throw new Error(`MCP execution failed: ${executeResult.content?.[0]?.text || "Unknown error"}`);
-    }
-
-    const executionResultText = executeResult.content[0].text;
-    const executionResult = JSON.parse(executionResultText);
-    
-    return {
-      success: executionResult.success !== false && !executionResult.error,
-      result: executionResult,
-      timestamp: new Date().toISOString()
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    };
-  }
-}
-
-/**
  * Execute a gcloud command from an action template via MCP
  * This is the new function for executing arbitrary gcloud commands
  * 
@@ -220,9 +149,14 @@ export async function executeGcloudScaleUp(params) {
   }
 
   try {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [MCP Client] executeGcloudScaleUp called`);
+    console.log(`[${timestamp}] [MCP Client] Parameters:`, JSON.stringify(params, null, 2));
+    
     const client = await getMCPClient();
 
     // Call the MCP tool to execute scale-up
+    console.log(`[${timestamp}] [MCP Client] Calling MCP tool: execute_gcloud_scale_up`);
     const result = await client.callTool({
       name: "execute_gcloud_scale_up",
       arguments: {
@@ -230,6 +164,8 @@ export async function executeGcloudScaleUp(params) {
         gcloudCommand: params.gcloudCommand.trim()
       }
     });
+    
+    console.log(`[${timestamp}] [MCP Client] MCP tool call completed. isError: ${result.isError}`);
 
     if (result.isError || !result.content || result.content.length === 0) {
       throw new Error(`MCP execution failed: ${result.content?.[0]?.text || "Unknown error"}`);
@@ -379,6 +315,95 @@ export async function generateMachineTypeDiff(params) {
 }
 
 /**
+ * Generate scaling schedule YAML diff via MCP from SCALEPRREQUEST format
+ * 
+ * @param {Object} params - Parameters for YAML diff generation
+ * @param {string} params.schedule - Schedule in format "mm hh dd MM * YYYY" (e.g., "30 17 4 02 * 2026")
+ * @param {number} params.duration - Duration in seconds (e.g., 7200)
+ * @param {string} params.name - Scale up name (e.g., "big sale")
+ * @returns {Promise<Object>} - Result with diff
+ */
+export async function generateScalingScheduleYamlDiff(params) {
+  // Check if MCP is enabled
+  if (process.env.ENABLE_MCP !== "true") {
+    throw new Error("MCP is not enabled. Set ENABLE_MCP=true to enable.");
+  }
+
+  const { schedule, duration, name } = params;
+
+  if (!schedule || !duration || !name) {
+    throw new Error("Missing required parameters: schedule, duration, name");
+  }
+
+  try {
+    const client = await getMCPClient();
+
+    // Call the MCP tool to generate the YAML diff
+    const result = await client.callTool({
+      name: "generate_scaling_schedule_yaml_diff",
+      arguments: {
+        schedule,
+        duration,
+        name
+      }
+    });
+
+    if (result.isError || !result.content || result.content.length === 0) {
+      const errorText = result.content?.[0]?.text || "Unknown error";
+      let errorDetails = errorText;
+      try {
+        const errorObj = JSON.parse(errorText);
+        errorDetails = errorObj.error || errorText;
+        if (errorObj.stderr) errorDetails += `\n\nStderr: ${errorObj.stderr}`;
+        if (errorObj.stdout) errorDetails += `\n\nStdout: ${errorObj.stdout}`;
+      } catch (e) {
+        // Not JSON, use as-is
+      }
+      throw new Error(`MCP execution failed: ${errorDetails}`);
+    }
+
+    const resultText = result.content[0].text;
+    const executionResult = JSON.parse(resultText);
+
+    if (executionResult.error) {
+      // Include stderr and stdout in error message for debugging
+      const errorMsg = executionResult.error;
+      const stderr = executionResult.stderr ? `\n\nStderr: ${executionResult.stderr}` : '';
+      const stdout = executionResult.stdout ? `\n\nStdout: ${executionResult.stdout}` : '';
+      throw new Error(`${errorMsg}${stderr}${stdout}`);
+    }
+
+    // Handle new response format (script execution returns output)
+    if (executionResult.output) {
+      return {
+        success: true,
+        ticketNumber: executionResult.ticketNumber,
+        schedule: executionResult.schedule,
+        duration: executionResult.duration,
+        output: executionResult.output,
+        message: executionResult.message || "Script execution completed"
+      };
+    }
+
+    // Handle old response format (diff generation) for backward compatibility
+    return {
+      success: true,
+      diff: executionResult.diff,
+      yamlContent: executionResult.yamlContent,
+      serviceName: executionResult.serviceName,
+      scheduleName: executionResult.scheduleName,
+      message: executionResult.message || "YAML diff generated successfully"
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
+/**
  * Alternative: Direct command execution via MCP tools
  * This would use MCP SDK if available
  */
@@ -389,6 +414,6 @@ export async function executeMCPCommand(command, args = {}) {
   // const client = new MCPClient({ serverUrl: process.env.MCP_SERVER_URL });
   // return await client.callTool("execute_command", { command, args });
   
-  throw new Error("MCP SDK integration not yet implemented. Use executeMCPAction instead.");
+  throw new Error("MCP SDK integration not yet implemented.");
 }
 

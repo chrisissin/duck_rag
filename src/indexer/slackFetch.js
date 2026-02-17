@@ -1,27 +1,9 @@
 /**
  * Slack fetch helpers with basic rate-limit handling.
  */
-export async function withSlackRetry(fn, logger = console) {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (e) {
-      // Slack Web API errors sometimes include data.response_metadata or "Retry-After" via e.data
-      const status = e?.data?.status || e?.status || null;
-      const retryAfter = parseInt(e?.data?.headers?.["retry-after"] || e?.data?.retry_after || 0, 10);
+import { withSlackRetry } from "../slack/retry.js";
 
-      if (status === 429 || retryAfter) {
-        const waitMs = (retryAfter ? retryAfter : Math.min(5 * (2 ** attempt), 60)) * 1000;
-        logger.warn?.(`Slack rate limited. Waiting ${waitMs}ms...`);
-        await new Promise(r => setTimeout(r, waitMs));
-        attempt++;
-        continue;
-      }
-      throw e;
-    }
-  }
-}
+export { withSlackRetry };
 
 export async function listAllPublicChannels(web) {
   let cursor = undefined;
@@ -32,7 +14,7 @@ export async function listAllPublicChannels(web) {
       cursor,
       types: "public_channel",
       exclude_archived: true
-    }));
+    }), { operation: "conversations.list" });
     if (res?.channels?.length) channels.push(...res.channels);
     cursor = res?.response_metadata?.next_cursor;
     if (!cursor) break;
@@ -50,7 +32,7 @@ export async function fetchHistory(web, channel, { oldest, limit = 200 }) {
       limit,
       cursor,
       oldest
-    }));
+    }), { operation: "conversations.history" });
     if (res?.messages?.length) all.push(...res.messages);
     cursor = res?.response_metadata?.next_cursor;
     if (!cursor) break;
@@ -64,7 +46,7 @@ export async function fetchThreadReplies(web, channel, thread_ts, { limit = 200 
     channel,
     ts: thread_ts,
     limit
-  }));
+  }), { operation: "conversations.replies" });
   // replies returns oldest->newest
   return res?.messages || [];
 }

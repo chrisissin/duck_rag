@@ -1,4 +1,4 @@
-import { executeMCPAction, generateTerragruntAutoscalerDiff, generateMachineTypeDiff } from "./mcpClient.js";
+import { generateTerragruntAutoscalerDiff, generateMachineTypeDiff } from "./mcpClient.js";
 
 async function formatActionTemplate(template, parsed, originalText = null, isGitPR = false, gcloudCommandTemplate = null) {
   if (!template) {
@@ -9,32 +9,26 @@ async function formatActionTemplate(template, parsed, originalText = null, isGit
   if (template.startsWith("MCP:")) {
     const mcpTool = template.substring(4); // Remove "MCP:" prefix
     
-    // For git PR option, return "under development" message
+    // For git PR option, return templated request text
     if (isGitPR && mcpTool === "generate_terragrunt_autoscaler_diff") {
-      return "🚧 *Under Development*\n\nGit PR scaling option is currently under development. This feature will allow you to create a pull request with terragrunt autoscaler configuration changes.";
+      return `I need the following information in this format to make you a PR for scaling up
+-----
+SCALEPRREQUEST
+Start: mm hh dd MM * YYYY (eq "30 17 4 02 * 2026" for 17:30 Feb 2nd 2026) (UTC zone)
+Duration: seconds (eq 7200 for 2 hours)
+name: scale up name (eq big sale)
+------`;
     }
     
     if (mcpTool === "execute_gcloud_scale_up") {
-      // For GCP command scale-up, use the command directly from policy
-      const { executeGcloudScaleUp } = await import("./mcpClient.js");
-      try {
-        if (!gcloudCommandTemplate) {
-          return `*GCP Scale-Up Command:*\n\n❌ No gcloud command template found in policy. Please add \`gcloud_command_template\` to the action template.`;
-        }
-        
-        // Pass the exact command from policy (no template replacement)
-        const result = await executeGcloudScaleUp({
-          serviceName: parsed.service_name || parsed.serviceName || null,
-          gcloudCommand: gcloudCommandTemplate
-        });
-        if (result.success) {
-          return `*GCP Scale-Up Command:*\n\`\`\`\n${result.command || gcloudCommandTemplate}\n\`\`\`\n\n${result.message || 'Ready to execute'}`;
-        } else {
-          return `Failed to prepare scale-up command: ${result.error || "Unknown error"}`;
-        }
-      } catch (error) {
-        return `Error preparing scale-up command: ${error.message}`;
+      // For GCP command scale-up, just format the command for display
+      // DO NOT execute it here - execution happens only when user approves in server.js
+      if (!gcloudCommandTemplate) {
+        return `*GCP Scale-Up Command:*\n\n❌ No gcloud command template found in policy. Please add \`gcloud_command_template\` to the action template.`;
       }
+      
+      // Just return the formatted command string for display
+      return `*GCP Scale-Up Command:*\n\`\`\`\n${gcloudCommandTemplate.trim()}\n\`\`\`\n\n✅ Ready to execute when approved`;
     }
     
     if (mcpTool === "generate_terragrunt_autoscaler_diff") {
@@ -103,6 +97,46 @@ async function formatActionTemplate(template, parsed, originalText = null, isGit
         }
       } catch (error) {
         return `Error generating machine type diff: ${error.message}`;
+      }
+    }
+    
+    if (mcpTool === "generate_scaling_schedule_yaml_diff") {
+      // Extract parameters from parsed data
+      const schedule = parsed.schedule || parsed.start || null;
+      const duration = parsed.duration || parsed.duration_sec || null;
+      const name = parsed.ticket_number || parsed.name || parsed.schedule_name || null;
+      
+      // Validate required parameters
+      if (!schedule || !duration || !name) {
+        return `Missing required parameters for scaling schedule. Need: schedule (mm hh dd MM * YYYY), duration (seconds), ticket_number. Current values: schedule=${schedule}, duration=${duration}, ticket_number=${name}`;
+      }
+      
+      // Instead of executing, prepare and display the script that will be executed
+      try {
+        const { readFileSync } = await import("fs");
+        const { join, dirname } = await import("path");
+        const { fileURLToPath } = await import("url");
+        
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = dirname(__filename);
+        const scriptPath = join(__dirname, "../../config/scale_pr.sh");
+        let scriptContent = readFileSync(scriptPath, "utf-8");
+        
+        // Replace placeholders with user input (for preview)
+        const ticketNumber = name.trim();
+        const scheduleString = schedule.trim();
+        const durationString = String(duration);
+        
+        scriptContent = scriptContent.replace(/REPLACEWITHSCHEDULENAME/g, ticketNumber);
+        scriptContent = scriptContent.replace(/REPLACEWITHUSERINPUTSCHEDULE/g, scheduleString);
+        scriptContent = scriptContent.replace(/REPLACEWITHUSERINPUTDURATION/g, durationString);
+        scriptContent = scriptContent.replace(/# big sale/g, `# ${ticketNumber}`);
+        scriptContent = scriptContent.replace(/feat: append big sale scaling schedule/g, `feat: append ${ticketNumber} scaling schedule`);
+        
+        // Return preview of the script that will be executed
+        return `*Script that will be executed:*\n\n\`\`\`bash\n${scriptContent}\`\`\`\n\n*Parameters:*\n- Ticket Number: ${ticketNumber}\n- Schedule: ${scheduleString}\n- Duration: ${durationString} seconds`;
+      } catch (error) {
+        return `Error preparing scaling schedule script: ${error.message}`;
       }
     }
     
@@ -187,9 +221,21 @@ export async function formatReport({ parsed, decision, policy = null, originalTe
     actionOptions = action;
   }
   
-  const summary = policy?.summary_template
-    ? formatSummaryTemplate(policy.summary_template, actionOptions || action, parsed)
-    : (actionOptions || action || "Approval required");
+  // If we have multiple action options, don't include them in the summary
+  // (they'll be displayed separately in the UI with individual buttons)
+  const hasMultipleOptions = actionList.length > 0;
+  let summaryTemplate = policy?.summary_template;
+  if (hasMultipleOptions && summaryTemplate) {
+    // Remove {action_options} from template when we have multiple options
+    // They'll be shown as separate sections with buttons
+    summaryTemplate = summaryTemplate.replace(/\{action_options\}/g, '');
+    // Also remove {action} if present
+    summaryTemplate = summaryTemplate.replace(/\{action\}/g, '');
+  }
+  
+  const summary = summaryTemplate
+    ? formatSummaryTemplate(summaryTemplate, hasMultipleOptions ? null : (actionOptions || action), parsed)
+    : (hasMultipleOptions ? null : (actionOptions || action || "Approval required"));
   
   const report = {
     parsed,
@@ -197,6 +243,7 @@ export async function formatReport({ parsed, decision, policy = null, originalTe
     action,
     actionOptions: actionList.length > 0 ? actionList : null, // Array of action options
     summary,
+    policy, // Include policy so actionTemplate is available in button values
     mcp_executed: false,
     mcp_result: null
   };

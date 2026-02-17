@@ -11,7 +11,7 @@ import { ollamaChat } from "./rag/ollama.js";
  * 2. Always run RAG to get context from Slack history
  * 3. Return both results if available
  */
-export async function processIncomingMessage({ text, channel_id }) {
+export async function processIncomingMessage({ text, channel_id, thread_ts = null }) {
   // --- PHASE 1: PARSER ENGINE ---
   // Uses your existing parserEngine.js logic 
   const parseResult = await parseAlert(text);
@@ -54,10 +54,11 @@ export async function processIncomingMessage({ text, channel_id }) {
 
   // --- COMBINE RESULTS ---
   // If both policy and RAG matched, combine them
+  // Policy result comes first, then RAG history
   if (policyResult && ragResult) {
     return {
       source: "both",
-      text: `${policyResult.text}\n\n--- Additional Context from Slack History ---\n\n${ragResult.text}`,
+      text: `${policyResult.text}\n\n*Additional Context from Slack History:*\n${ragResult.text}`,
       policy_result: policyResult,
       rag_result: ragResult,
       data: policyResult.data

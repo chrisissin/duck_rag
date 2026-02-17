@@ -3,18 +3,25 @@ import { searchSimilar } from "../db/slackChunksRepo.js";
 
 export async function retrieveContexts({ channel_id, question }) {
   //console.log("Retrieving contexts for question ", question, " and channel_id ", channel_id);
-  const topK = parseInt(process.env.TOP_K || "8", 10);
-  const embedding = await ollamaEmbed(question);
-  const rows = await searchSimilar({ channel_id, queryEmbedding: embedding, topK });
+  try {
+    const topK = parseInt(process.env.TOP_K || "8", 10);
+    const embedding = await ollamaEmbed(question);
+    const rows = await searchSimilar({ channel_id, queryEmbedding: embedding, topK });
 
-  const maxChars = parseInt(process.env.MAX_CONTEXT_CHARS || "12000", 10);
-  let total = 0;
-  const contexts = [];
-  for (const r of rows) {
-    const t = r.text || "";
-    if (total + t.length > maxChars) break;
-    total += t.length;
-    contexts.push(r);
+    const maxChars = parseInt(process.env.MAX_CONTEXT_CHARS || "12000", 10);
+    let total = 0;
+    const contexts = [];
+    for (const r of rows) {
+      const t = r.text || "";
+      if (total + t.length > maxChars) break;
+      total += t.length;
+      contexts.push(r);
+    }
+    return contexts;
+  } catch (err) {
+    const cause = err?.cause?.message || err?.cause;
+    const detail = cause ? ` (${cause})` : "";
+    console.warn(`[retrieveContexts] Failed to retrieve contexts: ${err?.message || err}${detail}`);
+    return [];
   }
-  return contexts;
 }
