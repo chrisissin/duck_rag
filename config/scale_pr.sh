@@ -5,7 +5,7 @@ BRANCH_NAME="REPLACEWITHSCHEDULENAME"
 FILE_PATH="production/scaling_schedules/api_disconnect_gacha_login_tmt.yaml"
 
 # Move to repo and refresh
-cd ~/kbm-devspc/mcoc-production/ || exit
+# cd ~/dir/proj/ || exit
 git checkout master
 git pull
 
